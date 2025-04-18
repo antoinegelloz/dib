@@ -5,48 +5,39 @@
 	},
 	"features": {
 			"ghcr.io/devcontainers/features/common-utils:2": {
-					"installZsh": "true",
+					"configureZshAsDefaultShell": "true",
 					"username": "vscode",
 					"userUid": "1000",
-					"userGid": "1000",
-					"upgradePackages": "true"
+					"userGid": "1000"
 			},
 			"ghcr.io/devcontainers/features/go:1": {
 					"version": "1.23.6",
 					"golangciLintVersion": "1.64.6"
 			},
-			"ghcr.io/devcontainers/features/git:1": {
-					"version": "latest",
-					"ppa": "false"
-			}
-	},
+			"ghcr.io/devcontainers/features/docker-in-docker:2": {}
+  },
+	// Use Docker-in-Docker to run buildkitd as a container
+	"postCreateCommand": "go mod download",
+	"postStartCommand": "docker rm -f buildkitd-container || true && docker run -d --name buildkitd-container --restart=unless-stopped -p 127.0.0.1:65000:65000 --privileged moby/buildkit:latest --addr tcp://0.0.0.0:65000",
+  "remoteEnv": {
+    "BUILDKIT_HOST": "tcp://127.0.0.1:65000"
+  },
 	"runArgs": [
 			"--cap-add=SYS_PTRACE",
 			"--security-opt",
 			"seccomp=unconfined"
 	],
-	// Configure tool-specific properties.
 	"customizations": {
-			// Configure properties specific to VS Code.
 			"vscode": {
-					// Set *default* container specific settings.json values on container create.
 					"settings": {
 							"go.toolsManagement.checkForUpdates": "local",
 							"go.useLanguageServer": true,
 							"go.gopath": "/go"
 					},
-					// Add the IDs of extensions you want installed when the container is created.
 					"extensions": [
 							"golang.Go"
 					]
 			}
 	},
-	// Use 'forwardPorts' to make a list of ports inside the container available locally.
-	// "forwardPorts": [],
-
-	// Use 'postCreateCommand' to run commands after the container is created.
-	// "postCreateCommand": "go version",
-
-	// Set `remoteUser` to `root` to connect as root instead. More info: https://aka.ms/vscode-remote/containers/non-root.
 	"remoteUser": "vscode"
 }
