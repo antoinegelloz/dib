@@ -3,6 +3,7 @@ extends: default
 
 ignore: |
   test/
+  .golangci.yml
 
 rules:
   comments:
