@@ -6,12 +6,13 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/radiofrance/dib/internal/logger"
-	k8sutils "github.com/radiofrance/dib/pkg/kubernetes"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
+
+	k8sutils "github.com/radiofrance/dib/pkg/kubernetes"
+	"github.com/radiofrance/dib/pkg/logger"
 )
 
 // KubernetesExecutor will run Buildkit in a Kubernetes cluster.
@@ -50,7 +51,26 @@ func (e KubernetesExecutor) ApplyWithWriters(ctx context.Context, stdout, stderr
 
 	go func() {
 		<-readyChan
-		k8sutils.PrintPodLogs(ctx, io.MultiWriter(stdout, stderr), e.clientSet, pod.Namespace, pod.Name, containerNames)
+		// Kubernetes logs API returns a single combined stdout+stderr stream.
+		// Avoid duplicating logs when stdout and stderr point to the same writer.
+		var out io.Writer
+
+		switch {
+		case stdout == nil && stderr == nil:
+			logger.Infof("Discarding pod logs")
+			out = io.Discard
+		case stderr == nil || stderr == stdout:
+			logger.Infof("Redirecting pod logs to stdout")
+			out = stdout
+		case stdout == nil:
+			logger.Infof("Redirecting pod logs to stderr")
+			out = stderr
+		default:
+			logger.Infof("Redirecting pod logs to stdout and stderr")
+			out = io.MultiWriter(stdout, stderr)
+		}
+
+		k8sutils.PrintPodLogs(ctx, out, e.clientSet, pod.Namespace, pod.Name, containerNames)
 	}()
 
 	_, err = e.clientSet.CoreV1().Pods(pod.Namespace).Create(ctx, pod, metav1.CreateOptions{})
