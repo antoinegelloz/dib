@@ -58,15 +58,19 @@ func (e KubernetesExecutor) ApplyWithWriters(ctx context.Context, stdout, stderr
 		switch {
 		case stdout == nil && stderr == nil:
 			logger.Infof("Discarding pod logs")
+
 			out = io.Discard
 		case stderr == nil || stderr == stdout:
 			logger.Infof("Redirecting pod logs to stdout")
+
 			out = stdout
 		case stdout == nil:
 			logger.Infof("Redirecting pod logs to stderr")
+
 			out = stderr
 		default:
 			logger.Infof("Redirecting pod logs to stdout and stderr")
+
 			out = io.MultiWriter(stdout, stderr)
 		}
 
