@@ -49,145 +49,6 @@ func provideDefaultOptions(t *testing.T) types.ImageBuilderOpts {
 	}
 }
 
-// This is an integration test and should be moved when we introduce integration tests structure.
-func Test_NewBKBuilder(t *testing.T) {
-	testCases := []struct {
-		name        string
-		cfg         Config
-		localOnly   bool
-		expectedErr error
-	}{
-		{
-			name:      "empty config with localOnly=true",
-			cfg:       Config{},
-			localOnly: true,
-		},
-		{
-			name: "valid config with localOnly=false and s3 context",
-			cfg: Config{
-				Context: Context{
-					S3: S3{
-						Bucket: "test-bucket",
-						Region: "us-west-1",
-					},
-				},
-				Executor: Executor{
-					Kubernetes: Kubernetes{
-						Namespace: "test-namespace",
-						Image:     "test-image",
-						ImagePullSecrets: []string{
-							"secret1",
-						},
-					},
-				},
-			},
-		},
-		{
-			name: "valid config with localOnly=false and azure context",
-			cfg: Config{
-				Context: Context{
-					Azure: Azure{
-						AccountName: "test-account",
-						Container:   "test-container",
-					},
-				},
-				Executor: Executor{
-					Kubernetes: Kubernetes{
-						Namespace: "test-namespace",
-						Image:     "test-image",
-						ImagePullSecrets: []string{
-							"secret1",
-						},
-					},
-				},
-			},
-		},
-		{
-			name: "invalid config with both azure and s3 context",
-			cfg: Config{
-				Context: Context{
-					Azure: Azure{
-						AccountName: "test-account",
-						Container:   "test-container",
-					},
-					S3: S3{
-						Bucket: "test-bucket",
-						Region: "us-west-1",
-					},
-				},
-			},
-			expectedErr: errors.New("only one of Azure or S3 can be configured for build context upload"),
-		},
-		{
-			name:        "invalid config without context",
-			cfg:         Config{},
-			expectedErr: errors.New("either Azure or S3 must be configured for build context upload"),
-		},
-		{
-			name: "invalid config without azure container",
-			cfg: Config{
-				Context: Context{
-					Azure: Azure{
-						AccountName: "test-account",
-					},
-				},
-			},
-			expectedErr: errors.New("creating context uploader: azure container name is required"),
-		},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			kubeconfigPath, err := createKubeconfig(t)
-			require.NoError(t, err)
-
-			t.Setenv("KUBECONFIG", kubeconfigPath)
-
-			builder, err := NewBKBuilder(context.Background(),
-				tc.cfg, mock.NewShellExecutor(nil), "buildctl", tc.localOnly)
-			if tc.expectedErr != nil {
-				require.Error(t, err)
-				assert.Contains(t, err.Error(), tc.expectedErr.Error())
-			} else {
-				require.NoError(t, err)
-				assert.NotNil(t, builder)
-				assert.NotNil(t, builder.contextProvider)
-
-				if tc.localOnly {
-					assert.NotNil(t, builder.bkShellExecutor.shellExecutor)
-					assert.Nil(t, builder.bkKubernetesExecutor.KubernetesExecutor)
-				} else {
-					assert.Nil(t, builder.bkShellExecutor.shellExecutor)
-					assert.NotNil(t, builder.bkKubernetesExecutor.KubernetesExecutor)
-				}
-			}
-		})
-	}
-}
-
-func createKubeconfig(t *testing.T) (string, error) {
-	t.Helper()
-	kubeconfigPath := filepath.Join(t.TempDir(), "kubeconfig")
-
-	err := os.WriteFile(kubeconfigPath, []byte(`
-apiVersion: v1
-kind: Config
-clusters:
-- cluster:
-    server: https://example-cluster:6443
-  name: example-cluster
-contexts:
-- context:
-    cluster: example-cluster
-  name: example-context
-current-context: example-context`), 0o400)
-	if err != nil {
-		return "", err
-	}
-
-	return kubeconfigPath, nil
-}
-
 type mockContextProvider struct {
 	context string
 }
@@ -200,7 +61,6 @@ func Test_Build_Remote(t *testing.T) {
 	t.Parallel()
 
 	const (
-		buildctlBinary = "buildctl"
 		//nolint:gosec
 		dockerConfigSecret = "docker-config-secret"
 	)
@@ -273,6 +133,7 @@ func Test_Build_Remote(t *testing.T) {
 			tc.modifyOpts(&opts)
 
 			podConfig := k8sutils.PodConfig{
+				DockerConfigSecret: tc.dockerConfigSecret,
 				// Use a fixed name generator for the pod to ensure the test is deterministic
 				NameGenerator: func() string { return "test-pod-name" },
 			}
@@ -280,21 +141,17 @@ func Test_Build_Remote(t *testing.T) {
 
 			buildctlArgs, err := generateBuildctlArgs(opts)
 			require.NoError(t, err)
-			//nolint:lll
-			expectedPodFunc := func(dockerConfigSecret string, podConfig k8sutils.PodConfig, args []string) (*corev1.Pod, error) {
-				pod, err := buildPod(dockerConfigSecret, podConfig, args)
+
+			expectedPodFunc := func(podConfig k8sutils.PodConfig, args []string) (*corev1.Pod, error) {
+				pod, err := buildPod(podConfig, args)
 				return pod, err
 			}
-			pod, _ := expectedPodFunc("docker-config-secret", podConfig, buildctlArgs)
+			pod, _ := expectedPodFunc(podConfig, buildctlArgs)
 			fakeExecutor := mock.NewKubernetesExecutor(pod)
 
 			b := Builder{
-				bkKubernetesExecutor: bkKubernetesExecutor{
-					KubernetesExecutor: fakeExecutor,
-					buildctlBinary:     buildctlBinary,
-					dockerConfigSecret: tc.dockerConfigSecret,
-					podConfig:          podConfig,
-				},
+				k8sExecutor:     fakeExecutor,
+				podConfig:       podConfig,
 				contextProvider: &mockContextProvider{opts.Context},
 			}
 
@@ -313,10 +170,14 @@ func Test_Build_Remote(t *testing.T) {
 	}
 }
 
+//nolint:tparallel
 func Test_Build_Local(t *testing.T) {
-	t.Parallel()
-
-	const buildctlBinary = "buildctl"
+	// Here, we need to mock a buildctl binary in the $PATH, because the Builder uses exec.LookPath to find it.
+	// So we create a temporary directory with a fake buildctl binary and prepend that directory to the $PATH.
+	tempDir := t.TempDir()
+	fakeBuildctlPath := filepath.Join(tempDir, "buildctl")
+	require.NoError(t, os.WriteFile(fakeBuildctlPath, []byte("#!/bin/sh\necho fake buildctl"), 0o755)) //nolint:gosec
+	t.Setenv("PATH", fmt.Sprintf("%s:%s", tempDir, os.Getenv("PATH")))
 
 	testCases := []struct {
 		name                  string
@@ -460,10 +321,7 @@ func Test_Build_Local(t *testing.T) {
 			tc.modifyOpts(&opts)
 
 			b := Builder{
-				bkShellExecutor: bkShellExecutor{
-					fakeExecutor,
-					buildctlBinary,
-				},
+				shellExecutor:   fakeExecutor,
 				contextProvider: &mockContextProvider{opts.Context},
 			}
 
@@ -473,7 +331,7 @@ func Test_Build_Local(t *testing.T) {
 			} else {
 				require.NoError(t, err)
 				assert.Len(t, fakeExecutor.Executed, 1)
-				assert.Equal(t, buildctlBinary, fakeExecutor.Executed[0].Command)
+				assert.Equal(t, fakeBuildctlPath, fakeExecutor.Executed[0].Command)
 
 				expectedBuildArgs := tc.expectedBuildArgsFunc(opts.Context)
 				assert.ElementsMatch(t, expectedBuildArgs, fakeExecutor.Executed[0].Args)
