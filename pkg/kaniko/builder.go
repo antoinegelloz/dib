@@ -6,14 +6,14 @@ import (
 	"io"
 	"strings"
 
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/radiofrance/kubecli"
+
 	"github.com/radiofrance/dib/pkg/buildcontext"
 	"github.com/radiofrance/dib/pkg/executor"
-	"github.com/radiofrance/dib/pkg/logger"
-
-	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/radiofrance/dib/pkg/kubernetes"
+	"github.com/radiofrance/dib/pkg/logger"
 	"github.com/radiofrance/dib/pkg/types"
-	"github.com/radiofrance/kubecli"
 )
 
 // Executor executes the Kaniko build.
