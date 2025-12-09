@@ -1,4 +1,4 @@
-package buildkit
+package buildcontext
 
 import (
 	"archive/tar"
@@ -23,27 +23,26 @@ type FileUploader interface {
 	PresignedURL(ctx context.Context, targetPath string) (string, error)
 }
 
-// RemoteContextProvider allows to upload the build context to a remote location.
+// RemoteContextProvider allows uploading the build context to a remote location.
 type RemoteContextProvider struct {
 	uploader FileUploader
+	builder  string
 }
 
-// NewRemoteContextProvider creates a new instance of RemoteContextProvider.
-func NewRemoteContextProvider(uploader FileUploader) *RemoteContextProvider {
-	return &RemoteContextProvider{uploader}
+func NewRemoteContextProvider(uploader FileUploader, builder string) *RemoteContextProvider {
+	return &RemoteContextProvider{uploader, builder}
 }
 
-// PrepareContext is responsible for creating an archive of the build context directory
-// and uploading it to the remote location where the buildkit build pod can retrieve it later.
+// PrepareContext is responsible for creating an archive of the docker build context files
+// and uploading it to the remote location where the build pod can retrieve it later.
 func (c *RemoteContextProvider) PrepareContext(ctx context.Context, opts types.ImageBuilderOpts) (string, error) {
 	tagParts := strings.Split(opts.Tags[0], ":")
 	shortName := path.Base(tagParts[0])
-	remoteDir := fmt.Sprintf("buildkit/%s", shortName)
-	filename := fmt.Sprintf("context-buildkit-%s-%s.tar.gz", shortName, tagParts[1])
-
+	remoteDir := fmt.Sprintf("%s/%s", c.builder, shortName)
+	filename := fmt.Sprintf("context-%s-%s-%s.tar.gz", c.builder, shortName, tagParts[1])
 	tarGzPath := path.Join(opts.Context, filename)
 
-	err := createArchive(opts.Context, tarGzPath)
+	err := createArchive(opts.Context, tarGzPath, c.builder)
 	if err != nil {
 		return "", err
 	}
@@ -59,8 +58,8 @@ func (c *RemoteContextProvider) PrepareContext(ctx context.Context, opts types.I
 }
 
 // createArchive builds an archive containing all the files in the build context.
-func createArchive(buildContextDir string, tarGzPath string) error {
-	logger.Infof("Creating docker build-context for buildkit")
+func createArchive(buildContextDir, tarGzPath, builder string) error {
+	logger.Infof("Creating docker build-context for %s", builder)
 
 	// Check if the build context directory exists.
 	_, err := os.Stat(buildContextDir)
@@ -68,7 +67,7 @@ func createArchive(buildContextDir string, tarGzPath string) error {
 		return fmt.Errorf("can't access directory %q: it doesn't exist", buildContextDir)
 	}
 
-	// Walk through the build context directory, and collect all the files to be archived.
+	// Walk through the build context directory and collect all the files to be archived.
 	files := make(map[string]os.FileInfo)
 
 	err = filepath.Walk(buildContextDir, func(filePath string, info os.FileInfo, err error) error {

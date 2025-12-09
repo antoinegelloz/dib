@@ -11,6 +11,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/distribution/reference"
 	"github.com/radiofrance/dib/internal/logger"
+	"github.com/radiofrance/dib/pkg/buildcontext"
 	"github.com/radiofrance/dib/pkg/exec"
 	"github.com/radiofrance/dib/pkg/executor"
 	k8sutils "github.com/radiofrance/dib/pkg/kubernetes"
@@ -19,17 +20,8 @@ import (
 	"github.com/radiofrance/kubecli"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
 	"k8s.io/utils/ptr"
 )
-
-// ContextProvider provides a layer of abstraction for different build context sources.
-type ContextProvider interface {
-	// PrepareContext allows to do some operations on the build context before the executor runs,
-	// like moving it to a remote location in order to be accessible by remote executors.
-	// It must return a URL compatible with Buildkit's `--context` flag.
-	PrepareContext(ctx context.Context, opts types.ImageBuilderOpts) (string, error)
-}
 
 type bkShellExecutor struct {
 	shellExecutor  executor.ShellExecutor
@@ -45,7 +37,7 @@ type bkKubernetesExecutor struct {
 type Builder struct {
 	bkShellExecutor      bkShellExecutor
 	bkKubernetesExecutor bkKubernetesExecutor
-	contextProvider      ContextProvider
+	contextProvider      buildcontext.ContextProvider
 }
 
 // Config holds the configuration for the Buildkit build backend.
@@ -77,7 +69,7 @@ func NewBKBuilder(ctx context.Context, cfg Config, shell executor.ShellExecutor,
 		err             error
 		k8sExecutor     executor.KubernetesExecutor
 		shellExecutor   executor.ShellExecutor
-		contextProvider ContextProvider
+		contextProvider buildcontext.ContextProvider
 	)
 
 	if localOnly {
@@ -95,8 +87,8 @@ func NewBKBuilder(ctx context.Context, cfg Config, shell executor.ShellExecutor,
 			logger.Fatalf("cannot load AWS config: %v", err)
 		}
 
-		s3 := NewS3Uploader(s3Cfg, cfg.Context.S3.Bucket)
-		contextProvider = NewRemoteContextProvider(s3)
+		s3 := buildcontext.NewS3Uploader(s3Cfg, cfg.Context.S3.Bucket)
+		contextProvider = buildcontext.NewRemoteContextProvider(s3, "buildkit")
 	}
 
 	return &Builder{
