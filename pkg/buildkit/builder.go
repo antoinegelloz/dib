@@ -42,85 +42,109 @@ type Builder struct {
 
 // Config holds the configuration for the Buildkit build backend.
 type Config struct {
-	Context struct {
-		S3 struct {
-			Bucket string `mapstructure:"bucket"`
-			Region string `mapstructure:"region"`
-		} `mapstructure:"s3"`
-	} `mapstructure:"context"`
-	Executor struct {
-		Kubernetes struct {
-			Namespace           string   `mapstructure:"namespace"`
-			Image               string   `mapstructure:"image"`
-			DockerConfigSecret  string   `mapstructure:"docker_config_secret"`
-			ImagePullSecrets    []string `mapstructure:"image_pull_secrets"`
-			EnvSecrets          []string `mapstructure:"env_secrets"`
-			ContainerOverride   string   `mapstructure:"container_override"`
-			PodTemplateOverride string   `mapstructure:"pod_template_override"`
-		} `mapstructure:"kubernetes"`
-	} `mapstructure:"executor"`
+	Context  Context  `mapstructure:"context"`
+	Executor Executor `mapstructure:"executor"`
+}
+
+// Executor holds the configuration for the executor.
+type Executor struct {
+	Kubernetes Kubernetes `mapstructure:"kubernetes"`
+}
+
+// Kubernetes holds the configuration for the Kubernetes executor.
+type Kubernetes struct {
+	Namespace           string            `mapstructure:"namespace"`
+	Image               string            `mapstructure:"image"`
+	DockerConfigSecret  string            `mapstructure:"docker_config_secret"`
+	ImagePullSecrets    []string          `mapstructure:"image_pull_secrets"`
+	EnvSecrets          []string          `mapstructure:"env_secrets"`
+	Env                 map[string]string `mapstructure:"env"`
+	ContainerOverride   string            `mapstructure:"container_override"`
+	PodTemplateOverride string            `mapstructure:"pod_template_override"`
+}
+
+// Context holds the configuration for the build context upload.
+type Context struct {
+	S3    S3    `mapstructure:"s3"`
+	Azure Azure `mapstructure:"azure"`
+}
+
+// S3 holds the configuration for S3-compatible storage for build context upload.
+type S3 struct {
+	Bucket string `mapstructure:"bucket"`
+	Region string `mapstructure:"region"`
+}
+
+// Azure holds the configuration for Azure Blob storage for build context upload.
+type Azure struct {
+	AccountName string `mapstructure:"account_name"`
+	Container   string `mapstructure:"container"`
 }
 
 // NewBKBuilder creates a new instance of Builder.
 func NewBKBuilder(ctx context.Context, cfg Config, shell executor.ShellExecutor,
 	binary string, localOnly bool,
 ) (*Builder, error) {
-	var (
-		err             error
-		k8sExecutor     executor.KubernetesExecutor
-		shellExecutor   executor.ShellExecutor
-		contextProvider buildcontext.ContextProvider
-	)
-
 	if localOnly {
-		shellExecutor = shell
-		contextProvider = NewLocalContextProvider()
-	} else {
-		k8sExecutor, err = createBuildkitKubernetesExecutor()
-		if err != nil {
-			logger.Fatalf("cannot create buidkit kubernetes executor: %v", err)
-		}
-
-		s3Cfg, err := config.LoadDefaultConfig(ctx,
-			config.WithRegion(cfg.Context.S3.Region))
-		if err != nil {
-			logger.Fatalf("cannot load AWS config: %v", err)
-		}
-
-		s3 := buildcontext.NewS3Uploader(s3Cfg, cfg.Context.S3.Bucket)
-		contextProvider = buildcontext.NewRemoteContextProvider(s3, "buildkit")
+		return &Builder{
+			bkShellExecutor: bkShellExecutor{
+				shell,
+				binary,
+			},
+			contextProvider: NewLocalContextProvider(),
+		}, nil
 	}
 
+	k8sExecutor, err := createBuildkitKubernetesExecutor()
+	if err != nil {
+		logger.Fatalf("cannot create buidkit kubernetes executor: %v", err)
+	}
+
+	env := map[string]string{
+		// This flag is required to avoid creating a new PID namespace for the rootlesskit child
+		// process and mounting the procfs, which is not possible. Sharing the host PID namespace
+		// can be dangerous, but it is safe here as we run buildkitd in rootless mode.
+		// Buildkit documentation recommends using `--oci-worker-no-process-sandbox` instead of
+		// `securityContext.procMount=Unmasked` to unmask the host procfs.
+		// see https://github.com/moby/buildkit/blob/master/docs/rootless.md#docker
+		"BUILDKITD_FLAGS": "--oci-worker-no-process-sandbox",
+	}
+	maps.Copy(env, cfg.Executor.Kubernetes.Env)
+
+	var uploader buildcontext.FileUploader
+	if cfg.Context.Azure.Container != "" {
+		uploader, err = buildcontext.NewAzureBlobUploader(
+			cfg.Context.Azure.AccountName, cfg.Context.Azure.Container)
+		if err != nil {
+			return nil, fmt.Errorf("cannot create Azure Blob uploader: %w", err)
+		}
+	} else {
+		env["AWS_REGION"] = cfg.Context.S3.Region
+
+		s3Cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(cfg.Context.S3.Region))
+		if err != nil {
+			return nil, fmt.Errorf("cannot load AWS config: %w", err)
+		}
+
+		uploader = buildcontext.NewS3Uploader(s3Cfg, cfg.Context.S3.Bucket)
+	}
+
+	contextProvider := buildcontext.NewRemoteContextProvider(uploader, "buildkit")
+
 	return &Builder{
-		bkShellExecutor: bkShellExecutor{
-			shellExecutor,
-			binary,
-		},
 		bkKubernetesExecutor: bkKubernetesExecutor{
 			KubernetesExecutor: k8sExecutor,
 			buildctlBinary:     binary,
 			dockerConfigSecret: cfg.Executor.Kubernetes.DockerConfigSecret,
 			podConfig: k8sutils.PodConfig{
-				Namespace:     cfg.Executor.Kubernetes.Namespace,
-				NameGenerator: k8sutils.UniquePodName("buildkit-dib"),
-				Labels: map[string]string{
-					"app.kubernetes.io/managed-by": "dib",
-				},
-				Image:            cfg.Executor.Kubernetes.Image,
-				ImagePullSecrets: cfg.Executor.Kubernetes.ImagePullSecrets,
-				EnvSecrets:       cfg.Executor.Kubernetes.EnvSecrets,
-				// Currently, Kubernetes pod environment variables are hardcoded in the code.
-				// In the future, we should allow introducing environment variables directly from the `.dib.yaml` file.
-				Env: map[string]string{
-					"AWS_REGION": cfg.Context.S3.Region,
-					//nolint:lll
-					// This flag is required to avoid creating a new PID namespace for the rootlesskit child process and mounting the procfs, which is not possible. Sharing the host PID namespace can be dangerous, but it is safe here as we run buildkitd in rootless mode.
-					// Buildkit documentation recommends using `--oci-worker-no-process-sandbox` instead of `securityContext.procMount=Unmasked` to unmask the host procfs.
-					// see https://github.com/moby/buildkit/blob/master/docs/rootless.md#docker
-					"BUILDKITD_FLAGS": "--oci-worker-no-process-sandbox",
-				},
-				PodOverride:       cfg.Executor.Kubernetes.PodTemplateOverride,
+				Namespace:         cfg.Executor.Kubernetes.Namespace,
+				Image:             cfg.Executor.Kubernetes.Image,
+				ImagePullSecrets:  cfg.Executor.Kubernetes.ImagePullSecrets,
+				Env:               env,
+				EnvSecrets:        cfg.Executor.Kubernetes.EnvSecrets,
+				Labels:            map[string]string{},
 				ContainerOverride: cfg.Executor.Kubernetes.ContainerOverride,
+				PodOverride:       cfg.Executor.Kubernetes.PodTemplateOverride,
 			},
 		},
 		contextProvider: contextProvider,
