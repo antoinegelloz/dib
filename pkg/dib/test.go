@@ -3,7 +3,7 @@ package dib
 import (
 	"context"
 
-	"github.com/radiofrance/dib/internal/logger"
+	"github.com/radiofrance/dib/pkg/logger"
 	"github.com/radiofrance/dib/pkg/types"
 	"golang.org/x/sync/errgroup"
 )

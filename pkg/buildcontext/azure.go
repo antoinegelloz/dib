@@ -11,7 +11,7 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/sas"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/service"
-	"github.com/radiofrance/dib/internal/logger"
+	"github.com/radiofrance/dib/pkg/logger"
 )
 
 // AzureBlobUploader implements the FileUploader interface to upload files to Azure Blob Storage.
