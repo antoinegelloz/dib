@@ -10,8 +10,8 @@ import (
 	"github.com/radiofrance/dib/pkg/executor"
 
 	"github.com/aws/aws-sdk-go-v2/config"
-	"github.com/radiofrance/dib/internal/logger"
 	"github.com/radiofrance/dib/pkg/kubernetes"
+	"github.com/radiofrance/dib/pkg/logger"
 	"github.com/radiofrance/dib/pkg/types"
 	"github.com/radiofrance/kubecli"
 )

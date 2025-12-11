@@ -8,7 +8,7 @@ import (
 
 	"github.com/radiofrance/dib/pkg/executor"
 
-	"github.com/radiofrance/dib/internal/logger"
+	"github.com/radiofrance/dib/pkg/logger"
 )
 
 // ContainerConfig holds the configuration options for the docker container.
