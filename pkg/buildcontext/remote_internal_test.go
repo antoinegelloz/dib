@@ -26,7 +26,7 @@ func Test_createArchive(t *testing.T) {
 		require.NoError(t, err)
 
 		archivePath := filepath.Join(srcDir, "test.tar.gz")
-		err = createArchive(srcDir, archivePath, "mockBuilder")
+		err = createArchive(srcDir, archivePath)
 		require.NoError(t, err)
 
 		verifyArchive(t, archivePath, []string{"file1.txt", "file2.txt"})
@@ -40,7 +40,7 @@ func Test_createArchive(t *testing.T) {
 		require.NoError(t, err)
 
 		archivePath := filepath.Join(srcDir, "non-existent", "test.tar.gz")
-		err = createArchive(srcDir, archivePath, "mockBuilder")
+		err = createArchive(srcDir, archivePath)
 		require.NoError(t, err)
 
 		verifyArchive(t, archivePath, []string{"file.txt"})
@@ -52,7 +52,7 @@ func Test_createArchive(t *testing.T) {
 		srcDir := t.TempDir()
 		archivePath := filepath.Join(srcDir, "test.tar.gz")
 
-		err := createArchive(srcDir, archivePath, "mockBuilder")
+		err := createArchive(srcDir, archivePath)
 		require.NoError(t, err)
 
 		verifyArchive(t, archivePath, []string{})
@@ -64,7 +64,7 @@ func Test_createArchive(t *testing.T) {
 		srcDir := "/non/existent/directory"
 		archivePath := "/tmp/test.tar.gz"
 
-		err := createArchive(srcDir, archivePath, "mockBuilder")
+		err := createArchive(srcDir, archivePath)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "can't access directory")
 	})

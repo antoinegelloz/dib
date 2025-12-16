@@ -167,44 +167,44 @@ func (b *Builder) Build(ctx context.Context, opts types.ImageBuilderOpts) error 
 
 	// `shellExecutor` or `kubernetesExecutor` are mutually exclusive.
 	if b.bkShellExecutor.shellExecutor != nil {
-		err = b.bkShellExecutor.shellExecutor.ExecuteStdout(b.bkShellExecutor.buildctlBinary, buildctlArgs...)
-		if err != nil {
-			return err
-		}
-	} else {
-		// Make a copy of the pod config to prevent concurrent modifications to the original
-		podConfig := b.bkKubernetesExecutor.podConfig
+		return b.bkShellExecutor.shellExecutor.ExecuteStdout(b.bkShellExecutor.buildctlBinary, buildctlArgs...)
+	}
 
-		// Extract image name from tags if available
-		if len(opts.Tags) > 0 {
-			tag := opts.Tags[0]
-			// Parse the tag to get a normalized reference
-			parsedReference, err := reference.ParseNormalizedNamed(tag)
-			if err != nil {
-				return fmt.Errorf("failed to parse image reference: %w", err)
-			}
-			// Get the familiar name (repository without tag)
-			imageName := reference.FamiliarName(parsedReference)
-			// Extract just the last part of the repository path
-			if idx := strings.LastIndex(imageName, "/"); idx > 0 {
-				imageName = imageName[idx+1:]
-			}
+	if len(opts.Tags) == 0 {
+		return errors.New("at least one tag is required when using the Kubernetes executor")
+	}
 
-			podConfig.NameGenerator = k8sutils.UniquePodNameWithImage("dib-buildkit", imageName)
-		}
+	// Parse the first tag to get a normalized reference
+	parsedReference, err := reference.ParseNormalizedNamed(opts.Tags[0])
+	if err != nil {
+		return fmt.Errorf("failed to parse image reference: %w", err)
+	}
 
-		logger.Debugf("building pod: podConfig: %+v buildctlArgs: %+v", podConfig, buildctlArgs)
+	// Get the familiar name (repository without tag)
+	imageName := reference.FamiliarName(parsedReference)
 
-		pod, err := buildPod(b.bkKubernetesExecutor.dockerConfigSecret, podConfig, buildctlArgs)
-		if err != nil {
-			return err
-		}
+	// Extract just the last part of the repository path
+	if idx := strings.LastIndex(imageName, "/"); idx > 0 {
+		imageName = imageName[idx+1:]
+	}
 
-		err = b.bkKubernetesExecutor.KubernetesExecutor.ApplyWithWriters(ctx,
-			opts.LogOutput, opts.LogOutput, pod, "buildkit")
-		if err != nil {
-			return err
-		}
+	// Make a copy of the pod config to prevent concurrent modifications to the original
+	podConfig := b.bkKubernetesExecutor.podConfig
+	podConfig.NameGenerator = k8sutils.UniquePodNameWithImage("dib-buildkit", imageName)
+
+	logger.Debugf("Building pod with config: %+v buildctlArgs: %+v", podConfig, buildctlArgs)
+
+	pod, err := buildPod(b.bkKubernetesExecutor.dockerConfigSecret, podConfig, buildctlArgs)
+	if err != nil {
+		return err
+	}
+
+	logger.Infof(`Starting pod "%s/%s" to build image %q`, pod.Namespace, pod.Name, imageName)
+
+	err = b.bkKubernetesExecutor.KubernetesExecutor.ApplyWithWriters(ctx,
+		opts.LogOutput, opts.LogOutput, pod, "buildkit")
+	if err != nil {
+		return err
 	}
 
 	return nil
@@ -303,8 +303,6 @@ func generateBuildctlArgs(opts types.ImageBuilderOpts) ([]string, error) {
 }
 
 func buildPod(dockerConfigSecret string, podConfig k8sutils.PodConfig, args []string) (*corev1.Pod, error) {
-	logger.Infof("Building image with Buildkit kubernetes executor")
-
 	if dockerConfigSecret == "" {
 		return nil, errors.New("the DockerConfigSecret option is required")
 	}

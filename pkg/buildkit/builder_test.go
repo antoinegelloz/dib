@@ -220,7 +220,7 @@ func Test_Build_Remote(t *testing.T) {
 			},
 			modifyPodConfig:    func(podConfig *k8sutils.PodConfig) {},
 			dockerConfigSecret: dockerConfigSecret,
-			expectedError:      nil,
+			expectedError:      errors.New("at least one tag is required when using the Kubernetes executor"),
 		},
 		{
 			name: "ExecutesWithFile",

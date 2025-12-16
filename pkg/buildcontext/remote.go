@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/distribution/reference"
 	"github.com/radiofrance/dib/pkg/logger"
 	"github.com/radiofrance/dib/pkg/types"
 )
@@ -33,7 +34,7 @@ func NewRemoteContextProvider(uploader FileUploader, builder string) *RemoteCont
 	return &RemoteContextProvider{uploader, builder}
 }
 
-// PrepareContext is responsible for creating an archive of the docker build context files
+// PrepareContext is responsible for creating an archive of the build context files
 // and uploading it to the remote location where the build pod can retrieve it later.
 func (c *RemoteContextProvider) PrepareContext(ctx context.Context, opts types.ImageBuilderOpts) (string, error) {
 	tagParts := strings.Split(opts.Tags[0], ":")
@@ -42,10 +43,23 @@ func (c *RemoteContextProvider) PrepareContext(ctx context.Context, opts types.I
 	filename := fmt.Sprintf("context-%s-%s-%s.tar.gz", c.builder, shortName, tagParts[1])
 	tarGzPath := path.Join(opts.Context, filename)
 
-	err := createArchive(opts.Context, tarGzPath, c.builder)
+	// Parse the first tag to get a normalized reference
+	parsedReference, err := reference.ParseNormalizedNamed(opts.Tags[0])
+	if err != nil {
+		return "", fmt.Errorf("failed to parse image reference: %w", err)
+	}
+
+	// Get the familiar name (repository without tag)
+	imageName := reference.FamiliarName(parsedReference)
+
+	logger.Infof("Creating the build context archive for image %q", imageName)
+
+	err = createArchive(opts.Context, tarGzPath)
 	if err != nil {
 		return "", err
 	}
+
+	logger.Infof("Uploading the build context archive for image %q", imageName)
 
 	targetPath := fmt.Sprintf("%s/%s", remoteDir, filename)
 
@@ -58,9 +72,7 @@ func (c *RemoteContextProvider) PrepareContext(ctx context.Context, opts types.I
 }
 
 // createArchive builds an archive containing all the files in the build context.
-func createArchive(buildContextDir, tarGzPath, builder string) error {
-	logger.Infof("Creating docker build-context for %s", builder)
-
+func createArchive(buildContextDir, tarGzPath string) error {
 	// Check if the build context directory exists.
 	_, err := os.Stat(buildContextDir)
 	if os.IsNotExist(err) {
@@ -168,8 +180,6 @@ func writeTarArchive(writer *tar.Writer, basePath, path string, info fs.FileInfo
 
 // uploadBuildContext uploads the file to the remote location.
 func uploadBuildContext(ctx context.Context, uploader FileUploader, tarGzPath, targetPath string) error {
-	logger.Infof("Uploading build-context to S3")
-
 	defer func() {
 		err := os.Remove(tarGzPath)
 		if err != nil {
