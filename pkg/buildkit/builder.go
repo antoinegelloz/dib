@@ -65,13 +65,20 @@ type Kubernetes struct {
 
 // Context holds the configuration for the build context upload.
 type Context struct {
-	S3 S3 `mapstructure:"s3"`
+	S3    S3    `mapstructure:"s3"`
+	Azure Azure `mapstructure:"azure"`
 }
 
 // S3 holds the configuration for S3-compatible storage for build context upload.
 type S3 struct {
 	Bucket string `mapstructure:"bucket"`
 	Region string `mapstructure:"region"`
+}
+
+// Azure holds the configuration for Azure Blob storage for build context upload.
+type Azure struct {
+	AccountName string `mapstructure:"account_name"`
+	Container   string `mapstructure:"container"`
 }
 
 // NewBKBuilder creates a new instance of Builder.
@@ -104,14 +111,23 @@ func NewBKBuilder(ctx context.Context, cfg Config, shell executor.ShellExecutor,
 	}
 	maps.Copy(env, cfg.Executor.Kubernetes.Env)
 
-	env["AWS_REGION"] = cfg.Context.S3.Region
+	var uploader buildcontext.FileUploader
+	if cfg.Context.Azure.Container != "" {
+		uploader, err = buildcontext.NewAzureBlobUploader(
+			cfg.Context.Azure.AccountName, cfg.Context.Azure.Container)
+		if err != nil {
+			return nil, fmt.Errorf("cannot create Azure Blob uploader: %w", err)
+		}
+	} else {
+		env["AWS_REGION"] = cfg.Context.S3.Region
 
-	s3Cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(cfg.Context.S3.Region))
-	if err != nil {
-		return nil, fmt.Errorf("cannot load S3 config: %w", err)
+		s3Cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(cfg.Context.S3.Region))
+		if err != nil {
+			return nil, fmt.Errorf("cannot load AWS config: %w", err)
+		}
+
+		uploader = buildcontext.NewS3Uploader(s3Cfg, cfg.Context.S3.Bucket)
 	}
-
-	uploader := buildcontext.NewS3Uploader(s3Cfg, cfg.Context.S3.Bucket)
 
 	contextProvider := buildcontext.NewRemoteContextProvider(uploader, "buildkit")
 
