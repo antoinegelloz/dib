@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/radiofrance/dib/pkg/logger"
@@ -20,11 +21,16 @@ type S3Uploader struct {
 	bucket string
 }
 
-func NewS3Uploader(cfg aws.Config, bucket string) *S3Uploader {
+func NewS3Uploader(ctx context.Context, region, bucket string) (*S3Uploader, error) {
+	cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(region))
+	if err != nil {
+		return nil, fmt.Errorf("loading S3 default config: %w", err)
+	}
+
 	return &S3Uploader{
 		s3:     s3.NewFromConfig(cfg),
 		bucket: bucket,
-	}
+	}, nil
 }
 
 func (u *S3Uploader) UploadFile(ctx context.Context, filePath, targetPath string) error {
