@@ -202,14 +202,13 @@ func doBuild(ctx context.Context, opts dib.BuildOpts, buildArgs map[string]strin
 	case types.BackendKaniko:
 		builder = kaniko.CreateBuilder(ctx, opts.Kaniko, shell, workingDir, opts.LocalOnly, opts.DryRun)
 	case types.BuildKitBackend:
-		buildctlBinary, err := buildkit.BuildctlBinary()
-		if err != nil {
-			return fmt.Errorf("cannot find buildctl binary: %w", err)
-		}
-
-		builder, err = buildkit.NewBKBuilder(ctx, opts.Buildkit, shell, buildctlBinary, opts.LocalOnly)
-		if err != nil {
-			return fmt.Errorf("creating buildkit builder: %w", err)
+		if opts.LocalOnly {
+			builder = buildkit.NewShellBuilder(shell)
+		} else {
+			builder, err = buildkit.NewK8sBuilder(ctx, opts.Buildkit)
+			if err != nil {
+				return fmt.Errorf("creating buildkit kubernetes builder: %w", err)
+			}
 		}
 	default:
 		return fmt.Errorf("invalid backend %q: not supported", opts.Backend)
@@ -219,7 +218,7 @@ func doBuild(ctx context.Context, opts dib.BuildOpts, buildArgs map[string]strin
 
 	res.Print()
 
-	err = report.Generate(res, dibBuilder.Graph)
+	err = report.Generate(res, graph)
 	if err != nil {
 		return fmt.Errorf("cannot generate report: %w", err)
 	}
@@ -233,44 +232,34 @@ func doBuild(ctx context.Context, opts dib.BuildOpts, buildArgs map[string]strin
 		return nil
 	}
 
-	var tagger types.ImageTagger
-
-	if opts.LocalOnly {
-		// Currently, completely ignore retagging when using BuildKit backend
-		if opts.Backend == types.BuildKitBackend {
-			buildctlBinary, err := buildkit.BuildctlBinary()
-			if err != nil {
-				return err
-			}
-
-			workerType, err := buildkit.GetBuildkitWorkerType(buildctlBinary, opts.BuildkitHost, shell)
-			if err != nil {
-				return fmt.Errorf("failed to detect buildkit worker type: %w", err)
-			}
-
-			switch workerType {
-			case buildkit.OciExecutorType:
-				logger.Warnf("Cannot retag the image with %s worker, please do it manually",
-					buildkit.OciExecutorType)
-			case buildkit.ContainerdExecutorType:
-				logger.Warnf("Retag with %s worker is not yet implemented, please make a manual retag",
-					buildkit.ContainerdExecutorType)
-			}
-
-			return nil
+	if opts.LocalOnly && opts.Backend == types.BuildKitBackend {
+		buildctlBinary, err := buildkit.BuildctlBinary()
+		if err != nil {
+			return err
 		}
 
-		tagger = dockerBuilderTagger
-	} else {
-		tagger = gcrRegistry
+		workerType, err := buildkit.GetBuildkitWorkerType(buildctlBinary, opts.BuildkitHost, shell)
+		if err != nil {
+			return fmt.Errorf("failed to detect buildkit worker type: %w", err)
+		}
+
+		switch workerType {
+		case buildkit.OciExecutorType:
+			logger.Warnf("Cannot retag the image with %q worker, please do it manually",
+				buildkit.OciExecutorType)
+		case buildkit.ContainerdExecutorType:
+			logger.Warnf("Retag with %q worker is not yet implemented, please make a manual retag",
+				buildkit.ContainerdExecutorType)
+		}
+
+		return nil
 	}
 
-	err = dib.Retag(graph, tagger, opts.PlaceholderTag, opts.Release)
-	if err != nil {
-		return fmt.Errorf("cannot retag images: %w", err)
+	if opts.LocalOnly {
+		return dib.Retag(graph, dockerBuilderTagger, opts.PlaceholderTag, opts.Release)
 	}
 
-	return nil
+	return dib.Retag(graph, gcrRegistry, opts.PlaceholderTag, opts.Release)
 }
 
 func getBuildkitHost(cmd *cobra.Command) (string, error) {

@@ -1,5 +1,5 @@
 //nolint:testpackage
-package buildkit
+package buildcontext
 
 import (
 	"context"
