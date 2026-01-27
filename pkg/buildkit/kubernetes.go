@@ -23,13 +23,6 @@ import (
 	"k8s.io/utils/ptr"
 )
 
-type Builder struct {
-	contextProvider buildcontext.ContextProvider
-	shellExecutor   executor.ShellExecutor
-	k8sExecutor     executor.KubernetesExecutor
-	podConfig       k8sutils.PodConfig // The default pod configuration used to run Buildkit builds.
-}
-
 // Config holds the configuration for the Buildkit build backend.
 type Config struct {
 	Context  Context  `mapstructure:"context"`
@@ -38,7 +31,7 @@ type Config struct {
 
 // Executor holds the configuration for the executor.
 type Executor struct {
-	Kubernetes k8sutils.PodConfig `mapstructure:"kubernetes"`
+	PodConfig k8sutils.PodConfig `mapstructure:"kubernetes"`
 }
 
 // Context holds the configuration for the build context upload.
@@ -59,57 +52,60 @@ type Azure struct {
 	Container   string `mapstructure:"container"`
 }
 
-// NewShellBuilder creates a new instance of Builder to use the shell executor to build images.
-func NewShellBuilder(shell executor.ShellExecutor) (*Builder, error) {
-	return &Builder{
-		shellExecutor:   shell,
-		contextProvider: NewLocalContextProvider(),
-	}, nil
+type K8sBuilder struct {
+	contextProvider buildcontext.ContextProvider
+	executor        executor.KubernetesExecutor
+	podConfig       k8sutils.PodConfig
 }
 
-// NewK8sBuilder creates a new instance of Builder to use the kubernetes executor to build images.
-func NewK8sBuilder(ctx context.Context, cfg Config) (*Builder, error) {
-	k8sExecutor, err := createK8sExecutor()
-	if err != nil {
-		return nil, fmt.Errorf("cannot create buildkit kubernetes executor: %w", err)
-	}
+// This defaultFlag is required to avoid creating a new PID namespace for the rootlesskit child
+// process and mounting the procfs, which is not possible. Sharing the host PID namespace
+// can be dangerous, but it is safe here as we run buildkitd in rootless mode.
+// Buildkit documentation recommends using `--oci-worker-no-process-sandbox` instead of
+// `securityContext.procMount=Unmasked` to unmask the host procfs.
+// see https://github.com/moby/buildkit/blob/master/docs/rootless.md#docker
+const defaultFlag = "--oci-worker-no-process-sandbox"
+
+// NewK8sBuilder creates a new instance of K8sBuilder to use the kubernetes executor to build images.
+func NewK8sBuilder(ctx context.Context, cfg Config) (*K8sBuilder, error) {
+	podConfig := cfg.Executor.PodConfig
 
 	// ensure env map exists
-	if cfg.Executor.Kubernetes.Env == nil {
-		cfg.Executor.Kubernetes.Env = make(map[string]string)
+	if podConfig.Env == nil {
+		podConfig.Env = make(map[string]string)
 	}
 
-	// This flag is required to avoid creating a new PID namespace for the rootlesskit child
-	// process and mounting the procfs, which is not possible. Sharing the host PID namespace
-	// can be dangerous, but it is safe here as we run buildkitd in rootless mode.
-	// Buildkit documentation recommends using `--oci-worker-no-process-sandbox` instead of
-	// `securityContext.procMount=Unmasked` to unmask the host procfs.
-	// see https://github.com/moby/buildkit/blob/master/docs/rootless.md#docker
-	const flag = "--oci-worker-no-process-sandbox"
-
-	existingFlags := cfg.Executor.Kubernetes.Env["BUILDKITD_FLAGS"]
+	existingFlags := podConfig.Env["BUILDKITD_FLAGS"]
 
 	// split on any whitespace, trimming extra spaces
 	flags := strings.Fields(existingFlags)
 
-	// avoid adding a duplicate flag
-	found := slices.Contains(flags, flag)
+	// avoid adding a duplicate defaultFlag
+	found := slices.Contains(flags, defaultFlag)
 
 	if !found {
-		flags = append(flags, flag)
+		flags = append(flags, defaultFlag)
 	}
 
-	cfg.Executor.Kubernetes.Env["BUILDKITD_FLAGS"] = strings.Join(flags, " ")
+	podConfig.Env["BUILDKITD_FLAGS"] = strings.Join(flags, " ")
+
+	k8sClient, err := kubecli.New("")
+	if err != nil {
+		return nil, fmt.Errorf("could not get KubeCli client: %w", err)
+	}
 
 	var uploader buildcontext.FileUploader
 
+	s3 := cfg.Context.S3
+	azure := cfg.Context.Azure
+
 	switch {
-	case cfg.Context.Azure.AccountName != "" && cfg.Context.S3.Bucket != "":
+	case azure.AccountName != "" && s3.Bucket != "":
 		return nil, errors.New("only one of Azure or S3 can be configured for build context upload")
-	case cfg.Context.Azure.AccountName != "":
-		uploader, err = buildcontext.NewAzureUploader(cfg.Context.Azure.AccountName, cfg.Context.Azure.Container)
-	case cfg.Context.S3.Bucket != "":
-		uploader, err = buildcontext.NewS3Uploader(ctx, cfg.Context.S3.Region, cfg.Context.S3.Bucket)
+	case azure.AccountName != "":
+		uploader, err = buildcontext.NewAzureUploader(azure.AccountName, azure.Container)
+	case s3.Bucket != "":
+		uploader, err = buildcontext.NewS3Uploader(ctx, s3.Region, s3.Bucket)
 	default:
 		return nil, errors.New("either Azure or S3 must be configured for build context upload")
 	}
@@ -118,15 +114,15 @@ func NewK8sBuilder(ctx context.Context, cfg Config) (*Builder, error) {
 		return nil, fmt.Errorf("creating context uploader: %w", err)
 	}
 
-	return &Builder{
-		k8sExecutor:     k8sExecutor,
-		podConfig:       cfg.Executor.Kubernetes,
+	return &K8sBuilder{
 		contextProvider: buildcontext.NewRemoteContextProvider(uploader, "buildkit"),
+		executor:        exec.NewKubernetesExecutor(k8sClient.ClientSet),
+		podConfig:       podConfig,
 	}, nil
 }
 
-// Build the image using the Buildkit backend.
-func (b *Builder) Build(ctx context.Context, opts types.ImageBuilderOpts) error {
+// Build the image using the kubernetes executor.
+func (b *K8sBuilder) Build(ctx context.Context, opts types.ImageBuilderOpts) error {
 	var err error
 
 	opts.Context, err = b.contextProvider.PrepareContext(ctx, opts)
@@ -137,16 +133,6 @@ func (b *Builder) Build(ctx context.Context, opts types.ImageBuilderOpts) error 
 	buildctlArgs, err := generateBuildctlArgs(opts)
 	if err != nil {
 		return err
-	}
-
-	// `shellExecutor` or `kubernetesExecutor` are mutually exclusive.
-	if b.shellExecutor != nil {
-		buildctlBinary, err := BuildctlBinary()
-		if err != nil {
-			return fmt.Errorf("cannot find buildctl binary: %w", err)
-		}
-
-		return b.shellExecutor.ExecuteStdout(buildctlBinary, buildctlArgs...)
 	}
 
 	if len(opts.Tags) == 0 {
@@ -180,22 +166,13 @@ func (b *Builder) Build(ctx context.Context, opts types.ImageBuilderOpts) error 
 
 	logger.Infof(`Starting pod "%s/%s" to build image %q`, pod.Namespace, pod.Name, imageName)
 
-	err = b.k8sExecutor.ApplyWithWriters(ctx,
+	err = b.executor.ApplyWithWriters(ctx,
 		opts.LogOutput, opts.LogOutput, pod, "buildkit")
 	if err != nil {
 		return err
 	}
 
 	return nil
-}
-
-func createK8sExecutor() (*exec.KubernetesExecutor, error) {
-	k8sClient, err := kubecli.New("")
-	if err != nil {
-		return nil, fmt.Errorf("could not get kube client from context: %w", err)
-	}
-
-	return exec.NewKubernetesExecutor(k8sClient.ClientSet), nil
 }
 
 func generateBuildctlArgs(opts types.ImageBuilderOpts) ([]string, error) {

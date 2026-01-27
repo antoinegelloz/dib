@@ -2,7 +2,6 @@
 package buildkit
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -10,169 +9,15 @@ import (
 	"path/filepath"
 	"testing"
 
-	k8sutils "github.com/radiofrance/dib/pkg/kubernetes"
-
 	"github.com/radiofrance/dib/pkg/mock"
-	"github.com/radiofrance/dib/pkg/testutil"
 	"github.com/radiofrance/dib/pkg/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	corev1 "k8s.io/api/core/v1"
 )
 
-func provideDefaultOptions(t *testing.T) types.ImageBuilderOpts {
-	t.Helper()
-	// generate Dockerfile
-	buildCtx := t.TempDir()
-	dockerfile := fmt.Sprintf(`FROM %s
-	CMD ["echo", "dib-build-test-string"]`, testutil.CommonImage)
-
-	err := os.WriteFile(filepath.Join(buildCtx, defaultDockerfileName), []byte(dockerfile), 0o600)
-	require.NoError(t, err)
-
-	return types.ImageBuilderOpts{
-		BuildkitHost: getBuildkitHostAddress(),
-		Context:      buildCtx,
-		Tags: []string{
-			"gcr.io/project-id/image:version",
-			"gcr.io/project-id/image:latest",
-		},
-		BuildArgs: map[string]string{
-			"someArg": "someValue",
-		},
-		Labels: map[string]string{
-			"someLabel": "someValue",
-		},
-		Push:      true,
-		LogOutput: &bytes.Buffer{},
-		Progress:  "auto",
-	}
-}
-
-type mockContextProvider struct {
-	context string
-}
-
-func (m *mockContextProvider) PrepareContext(_ context.Context, _ types.ImageBuilderOpts) (string, error) {
-	return m.context, nil
-}
-
-func Test_Build_Remote(t *testing.T) {
-	t.Parallel()
-
-	const (
-		//nolint:gosec
-		dockerConfigSecret = "docker-config-secret"
-	)
-
-	testCases := []struct {
-		name               string
-		modifyOpts         func(opts *types.ImageBuilderOpts)
-		modifyPodConfig    func(podConfig *k8sutils.PodConfig)
-		expectedPodFunc    func(dockerConfigSecret string, podConfig k8sutils.PodConfig, args []string) (*corev1.Pod, error)
-		dockerConfigSecret string
-		expectedError      error
-	}{
-		{
-			name:               "Executes",
-			modifyOpts:         func(opts *types.ImageBuilderOpts) {},
-			modifyPodConfig:    func(podConfig *k8sutils.PodConfig) {},
-			dockerConfigSecret: dockerConfigSecret,
-			expectedError:      nil,
-		},
-		{
-			name: "ExecutesDisablePush",
-			modifyOpts: func(opts *types.ImageBuilderOpts) {
-				opts.Push = false
-			},
-			modifyPodConfig:    func(podConfig *k8sutils.PodConfig) {},
-			dockerConfigSecret: dockerConfigSecret,
-			expectedError:      nil,
-		},
-		{
-			name: "ExecutesWithoutTags",
-			modifyOpts: func(opts *types.ImageBuilderOpts) {
-				opts.Tags = nil
-			},
-			modifyPodConfig:    func(podConfig *k8sutils.PodConfig) {},
-			dockerConfigSecret: dockerConfigSecret,
-			expectedError:      errors.New("at least one tag is required when using the Kubernetes executor"),
-		},
-		{
-			name: "ExecutesWithFile",
-			modifyOpts: func(opts *types.ImageBuilderOpts) {
-				opts.File = filepath.Join(opts.Context, defaultDockerfileName)
-			},
-			modifyPodConfig:    func(podConfig *k8sutils.PodConfig) {},
-			dockerConfigSecret: dockerConfigSecret,
-			expectedError:      nil,
-		},
-		{
-			name:       "ExecutesWithDiffrentNamespace",
-			modifyOpts: func(opts *types.ImageBuilderOpts) {},
-			modifyPodConfig: func(podConfig *k8sutils.PodConfig) {
-				podConfig.Namespace = "test-namespace"
-			},
-			dockerConfigSecret: dockerConfigSecret,
-			expectedError:      nil,
-		},
-		{
-			name:               "FailsOnExecutorError",
-			modifyOpts:         func(opts *types.ImageBuilderOpts) {},
-			modifyPodConfig:    func(podConfig *k8sutils.PodConfig) {},
-			dockerConfigSecret: "",
-			expectedError:      errors.New("the DockerConfigSecret option is required"),
-		},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			opts := provideDefaultOptions(t)
-			tc.modifyOpts(&opts)
-
-			podConfig := k8sutils.PodConfig{
-				DockerConfigSecret: tc.dockerConfigSecret,
-				// Use a fixed name generator for the pod to ensure the test is deterministic
-				NameGenerator: func() string { return "test-pod-name" },
-			}
-			tc.modifyPodConfig(&podConfig)
-
-			buildctlArgs, err := generateBuildctlArgs(opts)
-			require.NoError(t, err)
-
-			expectedPodFunc := func(podConfig k8sutils.PodConfig, args []string) (*corev1.Pod, error) {
-				pod, err := buildPod(podConfig, args)
-				return pod, err
-			}
-			pod, _ := expectedPodFunc(podConfig, buildctlArgs)
-			fakeExecutor := mock.NewKubernetesExecutor(pod)
-
-			b := Builder{
-				k8sExecutor:     fakeExecutor,
-				podConfig:       podConfig,
-				contextProvider: &mockContextProvider{opts.Context},
-			}
-
-			err = b.Build(context.Background(), opts)
-			if tc.expectedError != nil {
-				require.EqualError(t, err, tc.expectedError.Error())
-			} else {
-				require.NoError(t, err)
-				// Skip the comparison of the pod's name and instance label
-				// The test is still valid because we're checking that the executor was called with a pod
-				// that has the correct configuration, except for the name and instance label
-				// which are generated dynamically
-				assert.NotNil(t, fakeExecutor.Applied)
-			}
-		})
-	}
-}
-
 //nolint:tparallel
-func Test_Build_Local(t *testing.T) {
-	// Here, we need to mock a buildctl binary in the $PATH, because the Builder uses exec.LookPath to find it.
+func TestShellBuilder_Build(t *testing.T) {
+	// Here, we need to mock a buildctl binary in the $PATH, because the ShellBuilder uses exec.LookPath to find it.
 	// So we create a temporary directory with a fake buildctl binary and prepend that directory to the $PATH.
 	tempDir := t.TempDir()
 	fakeBuildctlPath := filepath.Join(tempDir, "buildctl")
@@ -320,8 +165,8 @@ func Test_Build_Local(t *testing.T) {
 			opts := provideDefaultOptions(t)
 			tc.modifyOpts(&opts)
 
-			b := Builder{
-				shellExecutor:   fakeExecutor,
+			b := ShellBuilder{
+				executor:        fakeExecutor,
 				contextProvider: &mockContextProvider{opts.Context},
 			}
 

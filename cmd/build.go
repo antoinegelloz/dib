@@ -203,10 +203,7 @@ func doBuild(ctx context.Context, opts dib.BuildOpts, buildArgs map[string]strin
 		builder = kaniko.CreateBuilder(ctx, opts.Kaniko, shell, workingDir, opts.LocalOnly, opts.DryRun)
 	case types.BuildKitBackend:
 		if opts.LocalOnly {
-			builder, err = buildkit.NewShellBuilder(shell)
-			if err != nil {
-				return fmt.Errorf("creating buildkit shell builder: %w", err)
-			}
+			builder = buildkit.NewShellBuilder(shell)
 		} else {
 			builder, err = buildkit.NewK8sBuilder(ctx, opts.Buildkit)
 			if err != nil {
