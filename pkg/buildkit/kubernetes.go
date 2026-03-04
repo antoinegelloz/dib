@@ -23,23 +23,6 @@ import (
 	"k8s.io/utils/ptr"
 )
 
-type bkShellExecutor struct {
-	shellExecutor  executor.ShellExecutor
-	buildctlBinary string
-}
-
-type bkKubernetesExecutor struct {
-	KubernetesExecutor executor.KubernetesExecutor
-	buildctlBinary     string
-	dockerConfigSecret string             // Name of the secret containing the docker config used by Buildkit (required).
-	podConfig          k8sutils.PodConfig // The default pod configuration used to run Buildkit builds.
-}
-type Builder struct {
-	bkShellExecutor      bkShellExecutor
-	bkKubernetesExecutor bkKubernetesExecutor
-	contextProvider      buildcontext.ContextProvider
-}
-
 // Config holds the configuration for the Buildkit build backend.
 type Config struct {
 	Context  Context  `mapstructure:"context"`
@@ -48,19 +31,7 @@ type Config struct {
 
 // Executor holds the configuration for the executor.
 type Executor struct {
-	Kubernetes Kubernetes `mapstructure:"kubernetes"`
-}
-
-// Kubernetes holds the configuration for the Kubernetes executor.
-type Kubernetes struct {
-	Namespace           string            `mapstructure:"namespace"`
-	Image               string            `mapstructure:"image"`
-	DockerConfigSecret  string            `mapstructure:"docker_config_secret"`
-	ImagePullSecrets    []string          `mapstructure:"image_pull_secrets"`
-	EnvSecrets          []string          `mapstructure:"env_secrets"`
-	Env                 map[string]string `mapstructure:"env"`
-	ContainerOverride   string            `mapstructure:"container_override"`
-	PodTemplateOverride string            `mapstructure:"pod_template_override"`
+	PodConfig k8sutils.PodConfig `mapstructure:"kubernetes"`
 }
 
 // Context holds the configuration for the build context upload.
@@ -81,61 +52,60 @@ type Azure struct {
 	Container   string `mapstructure:"container"`
 }
 
-// NewBKBuilder creates a new instance of Builder.
-func NewBKBuilder(ctx context.Context, cfg Config, shell executor.ShellExecutor,
-	binary string, localOnly bool,
-) (*Builder, error) {
-	if localOnly {
-		return &Builder{
-			bkShellExecutor: bkShellExecutor{
-				shell,
-				binary,
-			},
-			contextProvider: NewLocalContextProvider(),
-		}, nil
-	}
+type K8sBuilder struct {
+	contextProvider buildcontext.ContextProvider
+	executor        executor.KubernetesExecutor
+	podConfig       k8sutils.PodConfig
+}
 
-	k8sExecutor, err := createBuildkitKubernetesExecutor()
-	if err != nil {
-		return nil, fmt.Errorf("cannot create buildkit kubernetes executor: %w", err)
-	}
+// This defaultFlag is required to avoid creating a new PID namespace for the rootlesskit child
+// process and mounting the procfs, which is not possible. Sharing the host PID namespace
+// can be dangerous, but it is safe here as we run buildkitd in rootless mode.
+// Buildkit documentation recommends using `--oci-worker-no-process-sandbox` instead of
+// `securityContext.procMount=Unmasked` to unmask the host procfs.
+// see https://github.com/moby/buildkit/blob/master/docs/rootless.md#docker
+const defaultFlag = "--oci-worker-no-process-sandbox"
+
+// NewK8sBuilder creates a new instance of K8sBuilder to use the kubernetes executor to build images.
+func NewK8sBuilder(ctx context.Context, cfg Config) (*K8sBuilder, error) {
+	podConfig := cfg.Executor.PodConfig
 
 	// ensure env map exists
-	if cfg.Executor.Kubernetes.Env == nil {
-		cfg.Executor.Kubernetes.Env = make(map[string]string)
+	if podConfig.Env == nil {
+		podConfig.Env = make(map[string]string)
 	}
 
-	// This flag is required to avoid creating a new PID namespace for the rootlesskit child
-	// process and mounting the procfs, which is not possible. Sharing the host PID namespace
-	// can be dangerous, but it is safe here as we run buildkitd in rootless mode.
-	// Buildkit documentation recommends using `--oci-worker-no-process-sandbox` instead of
-	// `securityContext.procMount=Unmasked` to unmask the host procfs.
-	// see https://github.com/moby/buildkit/blob/master/docs/rootless.md#docker
-	const flag = "--oci-worker-no-process-sandbox"
-
-	existingFlags := cfg.Executor.Kubernetes.Env["BUILDKITD_FLAGS"]
+	existingFlags := podConfig.Env["BUILDKITD_FLAGS"]
 
 	// split on any whitespace, trimming extra spaces
 	flags := strings.Fields(existingFlags)
 
-	// avoid adding a duplicate flag
-	found := slices.Contains(flags, flag)
+	// avoid adding a duplicate defaultFlag
+	found := slices.Contains(flags, defaultFlag)
 
 	if !found {
-		flags = append(flags, flag)
+		flags = append(flags, defaultFlag)
 	}
 
-	cfg.Executor.Kubernetes.Env["BUILDKITD_FLAGS"] = strings.Join(flags, " ")
+	podConfig.Env["BUILDKITD_FLAGS"] = strings.Join(flags, " ")
+
+	k8sClient, err := kubecli.New("")
+	if err != nil {
+		return nil, fmt.Errorf("could not get KubeCli client: %w", err)
+	}
 
 	var uploader buildcontext.FileUploader
 
+	s3 := cfg.Context.S3
+	azure := cfg.Context.Azure
+
 	switch {
-	case cfg.Context.Azure.AccountName != "" && cfg.Context.S3.Bucket != "":
+	case azure.AccountName != "" && s3.Bucket != "":
 		return nil, errors.New("only one of Azure or S3 can be configured for build context upload")
-	case cfg.Context.Azure.AccountName != "":
-		uploader, err = buildcontext.NewAzureUploader(cfg.Context.Azure.AccountName, cfg.Context.Azure.Container)
-	case cfg.Context.S3.Bucket != "":
-		uploader, err = buildcontext.NewS3Uploader(ctx, cfg.Context.S3.Region, cfg.Context.S3.Bucket)
+	case azure.AccountName != "":
+		uploader, err = buildcontext.NewAzureUploader(azure.AccountName, azure.Container)
+	case s3.Bucket != "":
+		uploader, err = buildcontext.NewS3Uploader(ctx, s3.Region, s3.Bucket)
 	default:
 		return nil, errors.New("either Azure or S3 must be configured for build context upload")
 	}
@@ -144,27 +114,15 @@ func NewBKBuilder(ctx context.Context, cfg Config, shell executor.ShellExecutor,
 		return nil, fmt.Errorf("creating context uploader: %w", err)
 	}
 
-	return &Builder{
-		bkKubernetesExecutor: bkKubernetesExecutor{
-			KubernetesExecutor: k8sExecutor,
-			buildctlBinary:     binary,
-			dockerConfigSecret: cfg.Executor.Kubernetes.DockerConfigSecret,
-			podConfig: k8sutils.PodConfig{
-				Namespace:         cfg.Executor.Kubernetes.Namespace,
-				Image:             cfg.Executor.Kubernetes.Image,
-				ImagePullSecrets:  cfg.Executor.Kubernetes.ImagePullSecrets,
-				Env:               cfg.Executor.Kubernetes.Env,
-				EnvSecrets:        cfg.Executor.Kubernetes.EnvSecrets,
-				ContainerOverride: cfg.Executor.Kubernetes.ContainerOverride,
-				PodOverride:       cfg.Executor.Kubernetes.PodTemplateOverride,
-			},
-		},
+	return &K8sBuilder{
 		contextProvider: buildcontext.NewRemoteContextProvider(uploader, "buildkit"),
+		executor:        exec.NewKubernetesExecutor(k8sClient.ClientSet),
+		podConfig:       podConfig,
 	}, nil
 }
 
-// Build the image using the Buildkit backend.
-func (b *Builder) Build(ctx context.Context, opts types.ImageBuilderOpts) error {
+// Build the image using the kubernetes executor.
+func (b *K8sBuilder) Build(ctx context.Context, opts types.ImageBuilderOpts) error {
 	var err error
 
 	opts.Context, err = b.contextProvider.PrepareContext(ctx, opts)
@@ -175,11 +133,6 @@ func (b *Builder) Build(ctx context.Context, opts types.ImageBuilderOpts) error 
 	buildctlArgs, err := generateBuildctlArgs(opts)
 	if err != nil {
 		return err
-	}
-
-	// `shellExecutor` or `kubernetesExecutor` are mutually exclusive.
-	if b.bkShellExecutor.shellExecutor != nil {
-		return b.bkShellExecutor.shellExecutor.ExecuteStdout(b.bkShellExecutor.buildctlBinary, buildctlArgs...)
 	}
 
 	if len(opts.Tags) == 0 {
@@ -201,36 +154,25 @@ func (b *Builder) Build(ctx context.Context, opts types.ImageBuilderOpts) error 
 	}
 
 	// Make a copy of the pod config to prevent concurrent modifications to the original
-	podConfig := b.bkKubernetesExecutor.podConfig
+	podConfig := b.podConfig
 	podConfig.NameGenerator = k8sutils.UniquePodNameWithImage("dib-buildkit", imageName)
 
 	logger.Debugf("Building pod with config: %+v buildctlArgs: %+v", podConfig, buildctlArgs)
 
-	pod, err := buildPod(b.bkKubernetesExecutor.dockerConfigSecret, podConfig, buildctlArgs)
+	pod, err := buildPod(podConfig, buildctlArgs)
 	if err != nil {
 		return err
 	}
 
 	logger.Infof(`Starting pod "%s/%s" to build image %q`, pod.Namespace, pod.Name, imageName)
 
-	err = b.bkKubernetesExecutor.KubernetesExecutor.ApplyWithWriters(ctx,
+	err = b.executor.ApplyWithWriters(ctx,
 		opts.LogOutput, opts.LogOutput, pod, "buildkit")
 	if err != nil {
 		return err
 	}
 
 	return nil
-}
-
-func createBuildkitKubernetesExecutor() (*exec.KubernetesExecutor, error) {
-	k8sClient, err := kubecli.New("")
-	if err != nil {
-		return nil, fmt.Errorf("could not get kube client from context: %w", err)
-	}
-
-	executor := exec.NewKubernetesExecutor(k8sClient.ClientSet)
-
-	return executor, nil
 }
 
 func generateBuildctlArgs(opts types.ImageBuilderOpts) ([]string, error) {
@@ -314,8 +256,8 @@ func generateBuildctlArgs(opts types.ImageBuilderOpts) ([]string, error) {
 	return buildctlArgs, nil
 }
 
-func buildPod(dockerConfigSecret string, podConfig k8sutils.PodConfig, args []string) (*corev1.Pod, error) {
-	if dockerConfigSecret == "" {
+func buildPod(podConfig k8sutils.PodConfig, args []string) (*corev1.Pod, error) {
+	if podConfig.DockerConfigSecret == "" {
 		return nil, errors.New("the DockerConfigSecret option is required")
 	}
 
@@ -380,7 +322,7 @@ func buildPod(dockerConfigSecret string, podConfig k8sutils.PodConfig, args []st
 		}, envVars...),
 		VolumeMounts: []corev1.VolumeMount{
 			{
-				Name:      dockerConfigSecret,
+				Name:      podConfig.DockerConfigSecret,
 				MountPath: "/buildkit/.docker",
 				ReadOnly:  true,
 			},
@@ -463,10 +405,10 @@ func buildPod(dockerConfigSecret string, podConfig k8sutils.PodConfig, args []st
 			},
 			Volumes: []corev1.Volume{
 				{
-					Name: dockerConfigSecret,
+					Name: podConfig.DockerConfigSecret,
 					VolumeSource: corev1.VolumeSource{
 						Secret: &corev1.SecretVolumeSource{
-							SecretName:  dockerConfigSecret,
+							SecretName:  podConfig.DockerConfigSecret,
 							DefaultMode: ptr.To[int32](420),
 						},
 					},
