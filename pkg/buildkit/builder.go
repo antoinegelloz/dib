@@ -213,6 +213,7 @@ func (b *Builder) Build(ctx context.Context, opts types.ImageBuilderOpts) error 
 	}
 
 	logger.Infof(`Starting pod "%s/%s" to build image %q`, pod.Namespace, pod.Name, imageName)
+	logger.Debugf("Pod: %v", pod)
 
 	err = b.bkKubernetesExecutor.KubernetesExecutor.ApplyWithWriters(ctx,
 		opts.LogOutput, opts.LogOutput, pod, "buildkit")
