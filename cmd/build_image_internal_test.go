@@ -124,6 +124,8 @@ func TestNewImageBuilderOpts(t *testing.T) {
 
 			opts := test.opts
 			opts.BuildArg = []string{"VERSION=1.0.0"}
+			opts.Secret = []string{"id=npmrc,env=NPMRC"}
+			opts.SSH = []string{"default"}
 
 			imageOpts, err := newImageBuilderOpts(opts, test.buildContext, test.tags)
 			if test.wantErr != "" {
@@ -144,6 +146,8 @@ func TestNewImageBuilderOpts(t *testing.T) {
 			assert.Equal(t, wantTags, imageOpts.Tags)
 			assert.Equal(t, opts.LocalOnly, imageOpts.LocalOnly)
 			assert.Equal(t, map[string]string{"VERSION": "1.0.0"}, imageOpts.BuildArgs)
+			assert.Equal(t, []string{"id=npmrc,env=NPMRC"}, imageOpts.Secrets)
+			assert.Equal(t, []string{"default"}, imageOpts.SSH)
 			assert.Equal(t, "app", imageOpts.Labels["org.opencontainers.image.title"])
 		})
 	}
@@ -168,6 +172,7 @@ func TestBuildImageAction_Local(t *testing.T) {
 		"--local-only", "--buildkit-host", "unix:///run/buildkit.sock",
 		"--tag", "registry.example.org/team/app:0123456789-main",
 		"--file", "docker/Dockerfile", "--target", "final", "--build-arg", "VERSION=1.0.0",
+		"--secret", "id=npmrc,env=NPMRC", "--ssh", "default",
 		contextDir,
 	})
 	cmd.SetContext(t.Context())
@@ -193,6 +198,8 @@ func TestBuildImageAction_Local(t *testing.T) {
 		"--opt=target=final",
 		"--opt=build-arg:VERSION=1.0.0",
 		"--opt=label:org.opencontainers.image.title=app",
+		"--secret=id=npmrc,env=NPMRC",
+		"--ssh=default",
 	})
 }
 
