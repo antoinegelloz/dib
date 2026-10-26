@@ -336,7 +336,29 @@ func Test_Build_Local(t *testing.T) {
 					"--progress=auto",
 					"--frontend=dockerfile.v0",
 					fmt.Sprintf("--local=context=%s", context),
-					"--output=type=image,unpack=true,name=gcr.io/project-id/image:version,name=gcr.io/project-id/image:latest,push=true", //nolint:lll
+					"--output=type=image,unpack=true,\"name=gcr.io/project-id/image:version,gcr.io/project-id/image:latest\",push=true", //nolint:lll
+					fmt.Sprintf("--local=dockerfile=%s", context),
+					"--opt=filename=Dockerfile",
+					"--opt=build-arg:someArg=someValue",
+					"--opt=label:someLabel=someValue",
+				}
+			},
+			expectedError: nil,
+		},
+		{
+			name: "ExecutesWithOneTag",
+			modifyOpts: func(opts *types.ImageBuilderOpts) {
+				opts.LocalOnly = true
+				opts.Tags = []string{"gcr.io/project-id/image:version"}
+			},
+			expectedBuildArgsFunc: func(context string) []string {
+				return []string{
+					fmt.Sprintf("--addr=%s", getBuildkitHostAddress()),
+					"build",
+					"--progress=auto",
+					"--frontend=dockerfile.v0",
+					fmt.Sprintf("--local=context=%s", context),
+					"--output=type=image,unpack=true,name=gcr.io/project-id/image:version,push=true",
 					fmt.Sprintf("--local=dockerfile=%s", context),
 					"--opt=filename=Dockerfile",
 					"--opt=build-arg:someArg=someValue",
@@ -358,7 +380,7 @@ func Test_Build_Local(t *testing.T) {
 					"--progress=auto",
 					"--frontend=dockerfile.v0",
 					fmt.Sprintf("--local=context=%s", context),
-					"--output=type=image,unpack=true,name=gcr.io/project-id/image:version,name=gcr.io/project-id/image:latest",
+					"--output=type=image,unpack=true,\"name=gcr.io/project-id/image:version,gcr.io/project-id/image:latest\"",
 					fmt.Sprintf("--local=dockerfile=%s", context),
 					"--opt=filename=Dockerfile",
 					"--opt=build-arg:someArg=someValue",
@@ -402,7 +424,7 @@ func Test_Build_Local(t *testing.T) {
 					"--progress=auto",
 					"--frontend=dockerfile.v0",
 					fmt.Sprintf("--local=context=%s", context),
-					"--output=type=image,unpack=true,name=gcr.io/project-id/image:version,name=gcr.io/project-id/image:latest,push=true", //nolint:lll
+					"--output=type=image,unpack=true,\"name=gcr.io/project-id/image:version,gcr.io/project-id/image:latest\",push=true", //nolint:lll
 					fmt.Sprintf("--local=dockerfile=%s", context),
 					"--opt=filename=Dockerfile",
 					"--opt=build-arg:someArg=someValue",
@@ -424,7 +446,7 @@ func Test_Build_Local(t *testing.T) {
 					"--progress=auto",
 					"--frontend=dockerfile.v0",
 					fmt.Sprintf("--local=context=%s", context),
-					"--output=type=image,unpack=true,name=gcr.io/project-id/image:version,name=gcr.io/project-id/image:latest,push=true", //nolint:lll
+					"--output=type=image,unpack=true,\"name=gcr.io/project-id/image:version,gcr.io/project-id/image:latest\",push=true", //nolint:lll
 					fmt.Sprintf("--local=dockerfile=%s", context),
 					"--opt=filename=Dockerfile",
 					"--opt=build-arg:someArg=someValue",
@@ -447,7 +469,7 @@ func Test_Build_Local(t *testing.T) {
 					"--progress=auto",
 					"--frontend=dockerfile.v0",
 					fmt.Sprintf("--local=context=%s", context),
-					"--output=type=image,unpack=true,force-compression=true,compression=zstd,name=gcr.io/project-id/image:version,name=gcr.io/project-id/image:latest,push=true", //nolint:lll
+					"--output=type=image,unpack=true,force-compression=true,compression=zstd,\"name=gcr.io/project-id/image:version,gcr.io/project-id/image:latest\",push=true", //nolint:lll
 					fmt.Sprintf("--local=dockerfile=%s", context),
 					"--opt=filename=Dockerfile",
 					"--opt=build-arg:someArg=someValue",
