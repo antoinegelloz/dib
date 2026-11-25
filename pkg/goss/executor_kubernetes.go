@@ -1,4 +1,3 @@
-//nolint:goconst
 package goss
 
 import (
@@ -111,10 +110,8 @@ func (e KubernetesExecutor) Execute(ctx context.Context, output io.Writer, opts 
 			Volumes: []corev1.Volume{
 				{
 					Name: "shared",
-					VolumeSource: corev1.VolumeSource{
-						EmptyDir: &corev1.EmptyDirVolumeSource{
-							Medium: corev1.StorageMediumMemory,
-						},
+					EmptyDir: &corev1.EmptyDirVolumeSource{
+						Medium: corev1.StorageMediumMemory,
 					},
 				},
 			},
