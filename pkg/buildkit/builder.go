@@ -1,4 +1,3 @@
-//nolint:goconst
 package buildkit
 
 import (
@@ -55,6 +54,8 @@ type Executor struct {
 // Kubernetes holds the configuration for the Kubernetes executor.
 type Kubernetes struct {
 	Namespace           string            `mapstructure:"namespace"`
+	Labels              map[string]string `mapstructure:"labels"`
+	Annotations         map[string]string `mapstructure:"annotations"`
 	Image               string            `mapstructure:"image"`
 	DockerConfigSecret  string            `mapstructure:"docker_config_secret"`
 	ImagePullSecrets    []string          `mapstructure:"image_pull_secrets"`
@@ -152,6 +153,8 @@ func NewBuilder(ctx context.Context, cfg Config, shell executor.ShellExecutor,
 			dockerConfigSecret: cfg.Executor.Kubernetes.DockerConfigSecret,
 			podConfig: k8sutils.PodConfig{
 				Namespace:         cfg.Executor.Kubernetes.Namespace,
+				Labels:            cfg.Executor.Kubernetes.Labels,
+				Annotations:       cfg.Executor.Kubernetes.Annotations,
 				Image:             cfg.Executor.Kubernetes.Image,
 				ImagePullSecrets:  cfg.Executor.Kubernetes.ImagePullSecrets,
 				Env:               cfg.Executor.Kubernetes.Env,
@@ -339,10 +342,14 @@ func buildPod(dockerConfigSecret string, podConfig k8sutils.PodConfig, args []st
 	// Merge the default labels with those provided in the options.
 	maps.Copy(labels, podConfig.Labels)
 
+	annotations := make(map[string]string)
+	maps.Copy(annotations, podConfig.Annotations)
+
 	objectMeta := metav1.ObjectMeta{
-		Name:      podName,
-		Namespace: podConfig.Namespace,
-		Labels:    labels,
+		Name:        podName,
+		Namespace:   podConfig.Namespace,
+		Labels:      labels,
+		Annotations: annotations,
 	}
 
 	var imagePullSecrets []corev1.LocalObjectReference
@@ -364,9 +371,7 @@ func buildPod(dockerConfigSecret string, podConfig k8sutils.PodConfig, args []st
 	for _, secretName := range podConfig.EnvSecrets {
 		envFrom = append(envFrom, corev1.EnvFromSource{
 			SecretRef: &corev1.SecretEnvSource{
-				LocalObjectReference: corev1.LocalObjectReference{
-					Name: secretName,
-				},
+				Name: secretName,
 			},
 		})
 	}
@@ -391,19 +396,15 @@ func buildPod(dockerConfigSecret string, podConfig k8sutils.PodConfig, args []st
 			},
 		},
 		LivenessProbe: &corev1.Probe{
-			ProbeHandler: corev1.ProbeHandler{
-				Exec: &corev1.ExecAction{
-					Command: []string{"buildctl", "debug", "workers"},
-				},
+			Exec: &corev1.ExecAction{
+				Command: []string{"buildctl", "debug", "workers"},
 			},
 			InitialDelaySeconds: 5,
 			PeriodSeconds:       30,
 		},
 		ReadinessProbe: &corev1.Probe{
-			ProbeHandler: corev1.ProbeHandler{
-				Exec: &corev1.ExecAction{
-					Command: []string{"buildctl", "debug", "workers"},
-				},
+			Exec: &corev1.ExecAction{
+				Command: []string{"buildctl", "debug", "workers"},
 			},
 			InitialDelaySeconds: 5,
 			PeriodSeconds:       30,
@@ -469,11 +470,9 @@ func buildPod(dockerConfigSecret string, podConfig k8sutils.PodConfig, args []st
 			Volumes: []corev1.Volume{
 				{
 					Name: dockerConfigSecret,
-					VolumeSource: corev1.VolumeSource{
-						Secret: &corev1.SecretVolumeSource{
-							SecretName:  dockerConfigSecret,
-							DefaultMode: ptr.To[int32](420),
-						},
+					Secret: &corev1.SecretVolumeSource{
+						SecretName:  dockerConfigSecret,
+						DefaultMode: ptr.To[int32](420),
 					},
 				},
 			},
